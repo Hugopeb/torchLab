@@ -154,8 +154,15 @@ src/myproject/
 └── utils/          batching, Parameter, logging, model rebuilding
 examples/           training scripts behind the results table
 docs/               README figures and the script that generates them
+notes/              earlier from-scratch notebooks that led to torchLab
 tests/              gradient, optimizer and scheduler tests
 ```
+
+---
+
+## Background
+
+torchLab grew out of earlier from-scratch experiments. [`notes/01_neural_net_from_scratch.ipynb`](notes/01_neural_net_from_scratch.ipynb) builds an MLP for MNIST step by step — cross-entropy, manual backpropagation, training loop — reaching ~96% test accuracy.
 
 ---
 

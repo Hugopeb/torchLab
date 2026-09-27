@@ -18,3 +18,6 @@ dist/
 .vscode/
 
 
+
+# Datasets downloaded by the notebooks
+notes/data_MNIST/
