@@ -162,7 +162,7 @@ tests/              gradient, optimizer and scheduler tests
 
 ## Background
 
-torchLab grew out of earlier from-scratch experiments. [`notes/01_neural_net_from_scratch.ipynb`](notes/01_neural_net_from_scratch.ipynb) builds an MLP for MNIST step by step — cross-entropy, manual backpropagation, training loop — reaching ~96% test accuracy.
+torchLab grew out of earlier from-scratch experiments. [`notes/01_neural_net_from_scratch.ipynb`](notes/01_neural_net_from_scratch.ipynb) builds an MLP for MNIST step by step — cross-entropy, manual backpropagation, training loop — reaching ~96% test accuracy. [`notes/02_convolutional_net_from_scratch.ipynb`](notes/02_convolutional_net_from_scratch.ipynb) is a first CNN with per-channel loops and batch size 1, the limitations that motivated this framework.
 
 ---
 

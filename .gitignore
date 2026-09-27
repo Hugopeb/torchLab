@@ -21,3 +21,5 @@ dist/
 
 # Datasets downloaded by the notebooks
 notes/data_MNIST/
+notes/train_MNIST/
+notes/test_MNIST/
