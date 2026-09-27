@@ -120,6 +120,180 @@ class ReLU:
         }
 
 
+class BatchNorm:
+    """
+    Batch normalization over the channel dimension.
+
+    Works after a ConvolutionalLayer (input (N, C, H, W), statistics over N, H, W)
+    or after a Dense layer (input (N, C), statistics over N).
+
+    In training mode the batch mean and (biased) variance are used and the running
+    estimates are updated with an exponential moving average (the running variance
+    uses the unbiased estimate, as torch does). In evaluation mode the running
+    estimates are used instead.
+
+    Attributes:
+        num_features (int): Number of channels C.
+        weights (Parameter): Scale gamma, shape (C,).
+        bias (Parameter): Shift beta, shape (C,).
+        running_mean, running_var (torch.Tensor): Estimates used at evaluation.
+        momentum (float): Weight of the current batch in the running estimates.
+        training (bool): Set by NeuralNetwork.train() / NeuralNetwork.eval().
+    """
+    def __init__(self, num_features, momentum = 0.1, eps = 1e-5):
+        self.num_features = num_features
+        self.momentum = momentum
+        self.eps = eps
+        self.training = True
+
+        self.weights = Parameter(torch.ones(num_features))
+        self.bias = Parameter(torch.zeros(num_features))
+
+        self.running_mean = torch.zeros(num_features)
+        self.running_var = torch.ones(num_features)
+
+    def parameters(self):
+        return [self.weights, self.bias]
+
+    def _shape(self, input):
+        '''
+        Returns the dims to reduce over and the shape that broadcasts a
+        per-channel (C,) tensor against the input.
+        '''
+        if input.ndim == 4:
+            return (0, 2, 3), (1, -1, 1, 1)
+        if input.ndim == 2:
+            return (0,), (1, -1)
+        raise ValueError(f"BatchNorm expects input.ndim = 2 or 4 but got input.ndim = {input.ndim}")
+
+    def forward(self, input):
+        self.dims, self.view = self._shape(input)
+
+        if self.training:
+            mean = input.mean(dim = self.dims)
+            var = input.var(dim = self.dims, unbiased = False)
+
+            m = input.numel() // self.num_features
+            with torch.no_grad():
+                self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean
+                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * var * m / max(m - 1, 1)
+        else:
+            mean = self.running_mean
+            var = self.running_var
+
+        self.inv_std = (var + self.eps).rsqrt().view(self.view)
+        self.x_hat = (input - mean.view(self.view)) * self.inv_std
+
+        return self.weights.data.view(self.view) * self.x_hat + self.bias.data.view(self.view)
+
+    def backwards(self, grad_output):
+        '''
+        Gradients w.r.t gamma, beta and the input.
+
+        In training mode mean and variance depend on the input, which gives
+            dx = inv_std / m * (m * dx_hat - sum(dx_hat) - x_hat * sum(dx_hat * x_hat))
+        with dx_hat = grad_output * gamma and the sums over the reduced dims.
+        In evaluation mode the statistics are constants, so dx = dx_hat * inv_std.
+        '''
+        self.weights.grad = (grad_output * self.x_hat).sum(dim = self.dims)
+        self.bias.grad = grad_output.sum(dim = self.dims)
+
+        grad_x_hat = grad_output * self.weights.data.view(self.view)
+
+        if not self.training:
+            return grad_x_hat * self.inv_std
+
+        m = grad_output.numel() // self.num_features
+        sum_grad = grad_x_hat.sum(dim = self.dims, keepdim = True)
+        sum_grad_x_hat = (grad_x_hat * self.x_hat).sum(dim = self.dims, keepdim = True)
+
+        return self.inv_std / m * (m * grad_x_hat - sum_grad - self.x_hat * sum_grad_x_hat)
+
+    def get_config(self):
+        return {
+            "type": "BatchNorm",
+            "num_features": int(self.num_features),
+            "momentum": self.momentum,
+            "eps": self.eps
+        }
+
+    def state_dict(self):
+        return {
+            "weights": self.weights.data,
+            "bias": self.bias.data,
+            "running_mean": self.running_mean,
+            "running_var": self.running_var
+        }
+
+    def load_state_dict(self, state):
+        self.weights.data = state["weights"]
+        self.bias.data = state["bias"]
+        self.running_mean = state["running_mean"]
+        self.running_var = state["running_var"]
+
+    def stats(self):
+        '''
+        Returns the mean, std, max and min of gamma (weights) and beta (bias)
+        '''
+        return tuple(
+            {
+                "mean": t.data.mean().item(),
+                "std": t.data.std().item(),
+                "max": t.data.max().item(),
+                "min": t.data.min().item()
+            }
+            for t in (self.weights, self.bias)
+        )
+
+    def to(self, device):
+        self.weights.data = self.weights.data.to(device)
+        self.bias.data = self.bias.data.to(device)
+        self.running_mean = self.running_mean.to(device)
+        self.running_var = self.running_var.to(device)
+
+        return self
+
+
+class Dropout:
+    """
+    Inverted dropout.
+
+    During training each activation is zeroed with probability p and the
+    survivors are scaled by 1 / (1 - p), so the expected output matches the
+    input and no rescaling is needed at evaluation time, where the layer is
+    the identity.
+
+    Attributes:
+        p (float): Probability of dropping an activation.
+        training (bool): Set by NeuralNetwork.train() / NeuralNetwork.eval().
+        mask (torch.Tensor): Scaled keep-mask stored for the backward pass.
+    """
+    def __init__(self, p = 0.5):
+        if not 0.0 <= p < 1.0:
+            raise ValueError(f"Dropout probability must be in [0, 1), got {p}")
+        self.p = p
+        self.training = True
+
+    def forward(self, input):
+        if not self.training or self.p == 0.0:
+            self.mask = None
+            return input
+
+        self.mask = (torch.rand_like(input) >= self.p) / (1.0 - self.p)
+        return input * self.mask
+
+    def backwards(self, grad_output):
+        if self.mask is None:
+            return grad_output
+        return grad_output * self.mask
+
+    def get_config(self):
+        return {
+            "type": "Dropout",
+            "p": self.p
+        }
+
+
 class Tanh:
     """
     Hyperbolic tangent activation function.

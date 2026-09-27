@@ -21,6 +21,7 @@ class NeuralNetwork():
         state_dict(): Returns a dictionary of layer weights and bias
         load_state_dict(state): Loads a set of weight and bias previously trained
         stats(epoch): Returns a list of layer weights/bias stats: mean, std, max, min
+        train() / eval(): Switch layers like Dropout between training and evaluation
     """
     def __init__(self, architecture = []):
         self.layers = []
@@ -115,6 +116,24 @@ class NeuralNetwork():
 
         return state
     
+    def train(self):
+        '''
+        Puts layers with train/eval behaviour (e.g. Dropout) in training mode.
+        '''
+        for layer in self.layers:
+            if hasattr(layer, "training"):
+                layer.training = True
+        return self
+
+    def eval(self):
+        '''
+        Puts layers with train/eval behaviour (e.g. Dropout) in evaluation mode.
+        '''
+        for layer in self.layers:
+            if hasattr(layer, "training"):
+                layer.training = False
+        return self
+
     def to(self, device):
         for layer in self.layers:
             if hasattr(layer, "to"):

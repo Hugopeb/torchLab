@@ -87,25 +87,22 @@ def random_crop_and_flip(batch, padding=4):
     N, C, H, W = batch.shape
     device = batch.device
 
-    # pad: (pad_left, pad_right, pad_top, pad_bottom)
-    batch_padded = F.pad(batch, (padding, padding, padding, padding), mode='reflect')  # shape: N,C,H+8,W+8
+    batch_padded = F.pad(batch, (padding, padding, padding, padding), mode='reflect')
 
-    # random crop
-    out_h, out_w = H, W
-    max_top = 2 * padding
-    max_left = 2 * padding
+    max_offset = 2 * padding
 
-    # generate random top-left corners for each image
-    top = torch.randint(0, max_top + 1, (N,), device=device)
-    left = torch.randint(0, max_left + 1, (N,), device=device)
+    top = torch.randint(0, max_offset + 1, (N, 1), device=device)
+    left = torch.randint(0, max_offset + 1, (N, 1), device=device)
 
-    cropped = torch.zeros((N, C, out_h, out_w), device=device)
+    # Per-sample row/col indices into the padded image, gathered in one go
+    rows = (top + torch.arange(H, device=device))[:, None, :, None]       # (N, 1, H, 1)
+    cols = (left + torch.arange(W, device=device))[:, None, None, :]      # (N, 1, 1, W)
+    batch_idx = torch.arange(N, device=device)[:, None, None, None]
+    chan_idx = torch.arange(C, device=device)[None, :, None, None]
 
-    for i in range(N):
-        cropped[i] = batch_padded[i, :, top[i]:top[i]+out_h, left[i]:left[i]+out_w]
+    cropped = batch_padded[batch_idx, chan_idx, rows, cols]
 
-    # random horizontal flip
     flip_mask = torch.rand(N, device=device) < 0.5
-    cropped[flip_mask] = torch.flip(cropped[flip_mask], dims=[3])  # flip width dimension
+    cropped[flip_mask] = torch.flip(cropped[flip_mask], dims=[3])
 
     return cropped

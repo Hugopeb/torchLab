@@ -2,10 +2,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from myproject.model.activations import Dense, ReLU, Tanh, ConvolutionalLayer, ReshapeLayer, MaxPool, GAP
+from myproject.model.activations import Dense, ReLU, Tanh, ConvolutionalLayer, ReshapeLayer, MaxPool, GAP, Dropout, BatchNorm
 from myproject.model.neural_network import NeuralNetwork
 from myproject.loss.loss_functions import CrossEntropy, MSE
-from myproject.optimizer.optimizer import SGDWithMomentum
+from myproject.optimizer.optimizer import SGD, SGDWithMomentum
+from myproject.utils.utils import random_crop_and_flip, Parameter
 
 '''
 Gradient checks against torch.autograd.
@@ -114,6 +115,73 @@ def test_gap(device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("shape", [(6, 4, 5, 5), (6, 4)])
+@pytest.mark.parametrize("training", [True, False])
+def test_batchnorm(device, shape, training):
+    layer = BatchNorm(4).to(device)
+    # Non trivial gamma, beta and running stats so every term of the gradient matters
+    layer.weights.data = torch.randn(4, device = device)
+    layer.bias.data = torch.randn(4, device = device)
+    layer.running_mean = torch.randn(4, device = device)
+    layer.running_var = torch.rand(4, device = device) + 0.5
+    layer.training = training
+    input = torch.randn(*shape, device = device) * 2 + 1
+
+    ref = F.batch_norm(
+        input, layer.running_mean.clone(), layer.running_var.clone(),
+        layer.weights.data, layer.bias.data, training = training
+    )
+    assert torch.allclose(layer.forward(input), ref, atol = ATOL, rtol = RTOL)
+
+    check_layer_gradients(layer, input)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_batchnorm_running_stats(device):
+    layer = BatchNorm(3).to(device)
+    running_mean = torch.zeros(3, device = device)
+    running_var = torch.ones(3, device = device)
+
+    for _ in range(3):
+        input = torch.randn(8, 3, 4, 4, device = device) * 3 + 2
+        layer.forward(input)
+        F.batch_norm(input, running_mean, running_var, training = True, momentum = 0.1)
+
+    assert torch.allclose(layer.running_mean, running_mean, atol = ATOL)
+    assert torch.allclose(layer.running_var, running_var, atol = ATOL)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dropout(device):
+    layer = Dropout(p = 0.3)
+    input = torch.randn(5, 3, 6, 6, device = device)
+
+    # The random mask is drawn in forward, so reseed to get the same one in both passes
+    torch.manual_seed(1)
+    check_layer_gradients(layer, input)
+
+    # Roughly p of the activations dropped, survivors scaled by 1 / (1 - p)
+    output = layer.forward(torch.ones(1000, 100, device = device))
+    kept = output != 0
+    assert abs(1 - kept.float().mean().item() - 0.3) < 0.01
+    assert torch.allclose(output[kept], torch.full_like(output[kept], 1 / 0.7))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dropout_eval_is_identity(device):
+    model = NeuralNetwork([Dense(4, 4), Dropout(p = 0.5)]).to(device)
+    model.eval()
+    input = torch.randn(3, 4, device = device)
+    grad = torch.randn(3, 4, device = device)
+
+    assert torch.equal(model.layers[1].forward(input), input)
+    assert torch.equal(model.layers[1].backwards(grad), grad)
+
+    model.train()
+    assert model.layers[1].training
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_reshape_layer(device):
     check_layer_gradients(ReshapeLayer(), torch.randn(5, 3, 6, 6, device = device))
 
@@ -152,6 +220,7 @@ def test_full_network(device):
     '''
     model = NeuralNetwork([
         ConvolutionalLayer(4, 1, 3, padding = 1),
+        BatchNorm(4),
         Tanh(),
         ConvolutionalLayer(4, 4, 3, stride = 2),
         ReLU(),
@@ -199,3 +268,47 @@ def test_momentum_after_model_to_device():
 
     for p in model.parameters():
         assert p.data.device.type == "cuda"
+
+
+@pytest.mark.parametrize("optimizer_cls", [SGD, SGDWithMomentum])
+def test_weight_decay_matches_torch(optimizer_cls):
+    '''
+    Weight decay only on weights (ndim > 1), compared with torch.optim.SGD
+    using one param group with decay for the weights and one without for the bias.
+    '''
+    weights = Parameter(torch.randn(4, 3))
+    bias = Parameter(torch.randn(4))
+    ref_w = weights.data.clone().requires_grad_()
+    ref_b = bias.data.clone().requires_grad_()
+
+    momentum = {"momentum": 0.9} if optimizer_cls is SGDWithMomentum else {}
+    optimizer = optimizer_cls([weights, bias], lr = 0.1, weight_decay = 0.05, **momentum)
+    ref = torch.optim.SGD(
+        [{"params": [ref_w], "weight_decay": 0.05}, {"params": [ref_b], "weight_decay": 0.0}],
+        lr = 0.1, **momentum
+    )
+
+    for _ in range(3):
+        grad_w, grad_b = torch.randn(4, 3), torch.randn(4)
+        weights.grad, bias.grad = grad_w, grad_b
+        ref_w.grad, ref_b.grad = grad_w.clone(), grad_b.clone()
+        optimizer.step()
+        ref.step()
+
+    # torch applies lr to the velocity instead of inside it; same trajectory for a constant lr
+    assert torch.allclose(weights.data, ref_w.data, atol = ATOL)
+    assert torch.allclose(bias.data, ref_b.data, atol = ATOL)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_random_crop_and_flip(device):
+    batch = torch.randn(16, 3, 8, 8, device = device)
+    padded = F.pad(batch, (4, 4, 4, 4), mode = "reflect")
+    out = random_crop_and_flip(batch)
+
+    assert out.shape == batch.shape
+    # Every output image must be some 8x8 window of its padded input, possibly flipped
+    for i in range(16):
+        windows = padded[i].unfold(1, 8, 1).unfold(2, 8, 1).permute(1, 2, 0, 3, 4).reshape(-1, 3, 8, 8)
+        candidates = torch.cat([windows, torch.flip(windows, dims = [3])])
+        assert (candidates == out[i]).flatten(1).all(dim = 1).any()

@@ -12,9 +12,13 @@ class Trainer:
     - Executing the evaluation loop (forward + metric computation only)
     - Tracking timing and aggregate metrics per epoch
     - Coordinating logging and model artifact persistence
+
+    augment enables random crop + horizontal flip on each training batch
+    (meant for CIFAR-10, flipping MNIST digits would hurt).
     """
-    def __init__(self, model, loss_fn, logger, scheduler = None):
+    def __init__(self, model, loss_fn, logger, scheduler = None, augment = False):
         self.model = model
+        self.augment = augment
         self.logger = logger
         self.loss_fn = loss_fn
         self.scheduler = scheduler
@@ -38,9 +42,11 @@ class Trainer:
         total_epoch_CE = 0
         batch_index = 0
 
+        self.model.train()
 
         for x_batch, y_batch in get_batches(train_data, train_targets, batch_size = batch_size):
-            # x_batch = random_crop_and_flip(x_batch)
+            if self.augment:
+                x_batch = random_crop_and_flip(x_batch)
             output = self.model.forward(x_batch)
             avg_batch_CE = self.loss_fn.forward(output, y_batch)
             grad_input = self.loss_fn.backwards()
@@ -75,6 +81,8 @@ class Trainer:
         - eval_time: elapsed time for evaluation (seconds)
         """
         start = time.perf_counter()
+
+        self.model.eval()
 
         total_samples = len(eval_targets) 
         total_correct = 0

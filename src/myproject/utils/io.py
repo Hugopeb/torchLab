@@ -7,7 +7,7 @@ from torchvision.utils import make_grid
 
 from myproject.model.neural_network import NeuralNetwork
 from myproject.model.activations import ReshapeLayer
-from myproject.model.activations import ConvolutionalLayer, Dense, Tanh, ReLU, MaxPool, GAP
+from myproject.model.activations import ConvolutionalLayer, Dense, Tanh, ReLU, MaxPool, GAP, Dropout, BatchNorm
 from myproject.config import RUNS_DIR
 from myproject.utils.utils import get_timestamp
 
@@ -72,6 +72,9 @@ class Logger:
 
         if "momentum" in opt_config:
             config["momentum"] = opt_config["momentum"]
+
+        if "weight_decay" in opt_config:
+            config["weight_decay"] = opt_config["weight_decay"]
 
         path = os.path.join(self.run_dir, "config.json")
 
@@ -227,6 +230,18 @@ def build_NeuralNetwork(model_dir):
 
         elif layer_type == "GAP":
             layers.append(GAP())
+
+        elif layer_type == "BatchNorm":
+            layers.append(
+                BatchNorm(
+                    num_features = layer_cfg["num_features"],
+                    momentum = layer_cfg["momentum"],
+                    eps = layer_cfg["eps"]
+                )
+            )
+
+        elif layer_type == "Dropout":
+            layers.append(Dropout(p = layer_cfg["p"]))
 
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
