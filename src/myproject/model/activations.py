@@ -1,4 +1,4 @@
-from torch.nn.functional import conv2d
+from torch.nn.functional import conv2d, fold, pad
 import torch
 
 from myproject.utils.utils import ensure_conv_input, Parameter
@@ -42,8 +42,9 @@ class Dense:
 
         The method returns the gradient of the loss function w.r.t input or the layer.
         '''
-        self.weights.grad = grad_output.T @ self.input / self.batch_size
-        self.bias.grad = grad_output.sum(dim=0)  / self.batch_size
+        # grad_output already carries the 1 / batch_size factor from the loss
+        self.weights.grad = grad_output.T @ self.input
+        self.bias.grad = grad_output.sum(dim=0)
 
         self.grad_input = grad_output @ self.weights.data
 
@@ -151,9 +152,11 @@ class ConvolutionalLayer:
         self.output_channels = output_channels
         self.kernel_size = kernel_size
 
+        # Scale by 1 / sqrt(fan_in) so pre-activations don't saturate Tanh
+        fan_in = self.input_channels * self.kernel_size * self.kernel_size
         self.weights = Parameter(
-            torch.randn(self.output_channels, self.input_channels, self.kernel_size, self.kernel_size) 
-        ) 
+            torch.randn(self.output_channels, self.input_channels, self.kernel_size, self.kernel_size) / fan_in**0.5
+        )
         self.bias = Parameter(
             torch.zeros(self.output_channels)
         ) 
@@ -173,7 +176,7 @@ class ConvolutionalLayer:
         Stores input and computed output for backprop.
         """
         self.input = ensure_conv_input(input)
-        self.input_size = input.shape[2]
+        self.input_size = self.input.shape[2]
         self.batch_size = self.input.shape[0]
 
         self.output = conv2d(
@@ -200,55 +203,57 @@ class ConvolutionalLayer:
         Notes:
         - Weight gradient computed using convolution between input and grad_output.
         - Input gradient computed using flipped weights (standard conv backprop).
+        - For stride > 1, grad_output is used as a dilated kernel for the weight
+          gradient and is dilated with zeros before computing the input gradient.
         """
+        k = self.kernel_size
+        s = self.stride
+        H, W = self.input.shape[2:]
+
         self.bias.grad = grad_output.sum(dim = (0, 2, 3))
 
         input_permuted = self.input.permute(1,0,2,3)
         grad_output_permuted = grad_output.permute(1,0,2,3)
 
+        # When (H + 2p - k) is not a multiple of the stride the result is
+        # larger than the kernel, the extra rows/cols are discarded
         self.weights.grad = conv2d(
             input_permuted,
-            grad_output_permuted
-        ).permute(1,0,2,3)
-
-        '''
-        DEPRECATED PASS
-        self.grad_weights = torch.zeros(self.output_channels, self.input_channels, self.kernel_size, self.kernel_size)
-
-        reduced_input = self.input.mean(0)
-        reduced_grad_output = grad_output.mean(0)
-
-        for i in range(self.output_channels):
-            for j in range(self.input_channels):
-                self.grad_weights[i,j] = conv2d(
-                    reduced_input[j].unsqueeze(0).unsqueeze(0),
-                    reduced_grad_output[i].unsqueeze(0).unsqueeze(0),
-                    stride = self.stride,
-                    padding = self.padding
-                )
-        '''
+            grad_output_permuted,
+            padding = self.padding,
+            dilation = s
+        )[:, :, :k, :k].permute(1,0,2,3)
 
         weights_flipped = self.weights.data.flip(dims = [-1, -2]).permute(1,0,2,3)
-        
-        self.grad_input = conv2d(
+
+        # Insert (stride - 1) zeros between grad_output elements
+        if s > 1:
+            N, C, H_out, W_out = grad_output.shape
+            grad_output_dilated = torch.zeros(
+                (N, C, s * (H_out - 1) + 1, s * (W_out - 1) + 1),
+                device = grad_output.device
+            )
+            grad_output_dilated[:, :, ::s, ::s] = grad_output
+            grad_output = grad_output_dilated
+
+        # Full convolution gives the gradient w.r.t the padded input,
+        # of size s * (H_out - 1) + k along each spatial dim
+        grad_input_padded = conv2d(
             grad_output,
             weights_flipped,
-            padding = self.kernel_size - 1 - self.padding
+            padding = k - 1
         )
 
-        '''
-        DEPRECATED PASS
-        self.grad_input = torch.zeros(self.batch_size, self.input_channels, self.input_size, self.input_size)
+        # Padded input rows/cols skipped by the stride receive zero gradient
+        p = self.padding
+        grad_input_padded = pad(
+            grad_input_padded,
+            (0, W + 2*p - grad_input_padded.shape[3], 0, H + 2*p - grad_input_padded.shape[2])
+        )
 
-        for n in range(self.batch_size):
-            for j in range(self.input_channels):
-                self.grad_input[n,j] = conv2d(
-                    grad_output[n].unsqueeze(0),
-                    weights_flipped[j].unsqueeze(0),
-                    stride = self.stride,
-                    padding = self.kernel_size - 1
-                ) 
-        '''
+        # Discard the gradient that falls on the padding
+        self.grad_input = grad_input_padded[:, :, p:p + H, p:p + W]
+
         return self.grad_input
 
     def get_config(self):
@@ -256,7 +261,9 @@ class ConvolutionalLayer:
             "type": "ConvolutionalLayer",
             "output_channels": int(self.output_channels),
             "input_channels": int(self.input_channels),
-            "kernel_size": int(self.kernel_size)
+            "kernel_size": int(self.kernel_size),
+            "stride": int(self.stride),
+            "padding": int(self.padding)
         }
     
     def state_dict(self):
@@ -309,19 +316,15 @@ class ReshapeLayer:
     During backprop, reshapes gradients back to the original input shape.
     """
     def forward(self, x):
-        # Save original shape so we can restore it during backprop
         self.input_shape = x.shape
 
-        # Flatten all dimensions except batch
         self.output_shape = x.reshape(x.size(0), -1)
         return self.output_shape
 
     def backwards(self, grad_output):
-        # Restore gradient to the shape expected by the previous layer
         return grad_output.reshape(self.input_shape)
 
     def get_config(self):
-        # No learnable parameters; config is purely structural
         return {
             "type": "ReshapeLayer"
         }
@@ -336,7 +339,6 @@ class MaxPool:
     """
     def __init__(self, kernel_size, stride=None):
         self.kernel_size = kernel_size
-        # Default stride = kernel size (standard non-overlapping pooling)
         self.stride = stride if stride is not None else kernel_size
 
     def forward(self, input):
@@ -352,19 +354,15 @@ class MaxPool:
         k = self.kernel_size
         s = self.stride
 
-        # Extract sliding k×k windows using unfold
-        # Result shape: (N, C, out_h, out_w, k, k)
+        # (N, C, out_h, out_w, k, k)
         input_unfold = input.unfold(2, k, s).unfold(3, k, s)
 
-        # Flatten each k×k window to length k*k
         input_unfold_flat = input_unfold.reshape(
             *input_unfold.shape[:-2], k * k
         )
 
-        # Save index of max value in each window
         self.argmax = input_unfold_flat.argmax(dim=-1)
 
-        # Max pooling over last dimension (k*k)
         output = input_unfold_flat.max(dim=-1).values
         return output
 
@@ -381,20 +379,29 @@ class MaxPool:
         s = self.stride
         out_h, out_w = grad_output.shape[2:]
 
-        # Initialize gradient wrt input with zeros
-        grad_input = torch.zeros((N, C, H, W), device = grad_output.device)
-
-        # Unfold grad_input to match forward window structure
-        grad_input_unfold = grad_input.unfold(2, k, s).unfold(3, k, s)
-        grad_input_unfold = grad_input_unfold.reshape(
-            N, C, out_h, out_w, k * k
+        # Gradient per window, same structure as the forward unfold
+        # (reshaping an unfold view makes a copy, so we can't scatter
+        # into grad_input directly)
+        grad_windows = torch.zeros(
+            (N, C, out_h, out_w, k * k), device = grad_output.device
         )
 
-        # Scatter gradients back to max locations only
-        grad_input_unfold.scatter_(
+        grad_windows.scatter_(
             dim=-1,
             index=self.argmax.unsqueeze(-1),
             src=grad_output.unsqueeze(-1)
+        )
+
+        # fold expects (N, C * k * k, out_h * out_w) and places each window
+        # back in (H, W), summing where windows overlap
+        grad_windows = grad_windows.permute(0, 1, 4, 2, 3).reshape(
+            N, C * k * k, out_h * out_w
+        )
+        grad_input = fold(
+            grad_windows,
+            output_size = (H, W),
+            kernel_size = k,
+            stride = s
         )
 
         return grad_input
@@ -418,10 +425,8 @@ class GAP:
     Output shape: (batch, channels)
     """
     def forward(self, input):
-        # Save input for shape reference during backprop
         self.input = input
 
-        # Average over spatial dimensions (H, W)
         output = input.mean(dim=(-1, -2))
         return output
 
@@ -436,15 +441,12 @@ class GAP:
         """
         B, C, H, W = self.input.shape
 
-        # Expand gradient back to spatial dimensions and normalize
         grad_input = grad_output[:, :, None, None] / (H * W)
 
-        # Broadcasting fills (H, W)
         grad_input = grad_input.expand(B, C, H, W)
         return grad_input
 
     def get_config(self):
-        # No learnable parameters
         return {
             "type": "GAP"
         }

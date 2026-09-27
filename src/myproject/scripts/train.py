@@ -14,20 +14,14 @@ print(f"Selected device: {device}")
 
 train_images, train_targets, test_images, test_targets = process_MNIST(device = device)
 
-# Inititalize model. 
 model = NeuralNetwork([
-    ConvolutionalLayer(8, 1, 3, padding=1),
+    ConvolutionalLayer(8, 1, 3),
     Tanh(),
-    ConvolutionalLayer(8, 8, 3, padding = 1),
-    Tanh(),
-    MaxPool(2,2),
-    ConvolutionalLayer(16, 8, 3, padding = 1),
-    Tanh(),
-    ConvolutionalLayer(8, 16, 3, padding = 1),
+    ConvolutionalLayer(8, 8, 3),
     Tanh(),
     MaxPool(2,2),
     ReshapeLayer(),
-    Dense(256, 8),
+    Dense(256, 1152),
     Tanh(),
     Dense(10, 256)
 ])
@@ -59,7 +53,7 @@ trainer.train_model(
     train_targets = train_targets,
     eval_data = test_images,
     eval_targets = test_targets,
-    num_epochs = 1,
+    num_epochs = 10,
     batch_size = 64,
     eval=True
 )

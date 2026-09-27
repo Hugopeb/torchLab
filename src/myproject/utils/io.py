@@ -177,7 +177,8 @@ def build_NeuralNetwork(model_dir):
     json_path = folder_path / "architecture.json"
     state_path = folder_path / "weights.pth"
 
-    state = torch.load(state_path)
+    # Load on CPU so weights saved on cuda can be restored anywhere, use model.to(device) after
+    state = torch.load(state_path, map_location = "cpu")
 
     with open(json_path, "r") as f:
         config = json.load(f)
@@ -192,7 +193,10 @@ def build_NeuralNetwork(model_dir):
                 ConvolutionalLayer(
                     output_channels = layer_cfg["output_channels"],
                     input_channels = layer_cfg["input_channels"],
-                    kernel_size = layer_cfg["kernel_size"]
+                    kernel_size = layer_cfg["kernel_size"],
+                    # Runs saved before stride/padding were logged used the defaults
+                    stride = layer_cfg.get("stride", 1),
+                    padding = layer_cfg.get("padding", 0)
                 )
             )
 
